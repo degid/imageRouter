@@ -1,18 +1,19 @@
+from struct import pack
 CFE_FS_KERNEL_FILENAME = "RU_DSL-2500U_306043H00_cfe_fs_kernel"
 CRC32_INIT_VALUE = 0xffffffff
 
 ADDRESS_LEN = {
     'TAG_LEN': 256,
-    'TAGVER_LEN': 4,  # Length of Tag Version
-    'SIG1_LEN': 20,  # Company Signature 1 Length
-    'SIG2_LEN': 14,  # Company Signature 2 Lenght
-    'BOARDID_LEN': 16,  # Length of BoardId
+    'TAGVER_LEN': 4,      # Length of Tag Version
+    'SIG1_LEN': 20,       # Company Signature 1 Length
+    'SIG2_LEN': 14,       # Company Signature 2 Lenght
+    'BOARDID_LEN': 16,    # Length of BoardId
     'ENDIANFLAG_LEN': 2,  # Endian Flag Length
-    'CHIPID_LEN': 6,  # Chip Id Length
-    'IMAGE_LEN': 10,  # Length of Length Field
-    'ADDRESS_LEN': 12,  # Length of Address field
-    'DUALFLAG_LEN': 2,  # Dual Image flag Length
-    'INACTIVEFLAG_LEN': 2,  # Inactie Flag Length
+    'CHIPID_LEN': 6,      # Chip Id Length
+    'IMAGE_LEN': 10,      # Length of Length Field
+    'ADDRESS_LEN': 12,    # Length of Address field
+    'DUALFLAG_LEN': 2,    # Dual Image flag Length
+    'INACTIVEFLAG_LEN': 2,# Inactie Flag Length
     'RSASIG_LEN': 20,
     'TOKEN_LEN': 20,
     'DLINK': 32,
@@ -42,15 +43,14 @@ bcm_tag = [
     ('dualImage', ADDRESS_LEN['DUALFLAG_LEN']),             # 138-139: Unused at present
     ('inactiveFlag', ADDRESS_LEN['INACTIVEFLAG_LEN']),      # 140-141: Unused at present
     ('reserved', ADDRESS_LEN['RESERVED_LEN']),			    # Reserved for later use
-    ('CRCimage', ADDRESS_LEN['CRC32_LEN']),	        # Image validation token (4 unsigned char CRC)
+    ('CRCimage', ADDRESS_LEN['CRC32_LEN']),	                # Image validation token (4 unsigned char CRC)
     ('CRCsqsh', ADDRESS_LEN['CRC32_LEN']),	                # Image validation token (4 unsigned char CRC)
     ('CRCkernel', ADDRESS_LEN['CRC32_LEN']),	            # Image validation token (4 unsigned char CRC)
     ('imageValidationTokenRez', ADDRESS_LEN['RSASIG_LEN']-ADDRESS_LEN['CRC32_LEN']*3),	# Image validation token (4 unsigned char CRC)
-    #('imageValidationToken', ADDRESS_LEN['RSASIG_LEN']),	# Image validation token (4 unsigned char CRC)
-    ('CRCbcmtag', ADDRESS_LEN['CRC32_LEN']),	    # Validation token for tag (from signature_1 to end)
-    ('tagValidationToken', ADDRESS_LEN['RSASIG_LEN']-ADDRESS_LEN['CRC32_LEN'])	    # Validation token for tag (from signature_1 to end)
+    #('imageValidationToken', ADDRESS_LEN['RSASIG_LEN']),	                            # Image validation token (4 unsigned char CRC)
+    ('CRCbcmtag', ADDRESS_LEN['CRC32_LEN']),	                                        # Validation token for tag (from signature_1 to end)
+    ('tagValidationToken', ADDRESS_LEN['RSASIG_LEN']-ADDRESS_LEN['CRC32_LEN'])	        # Validation token for tag (from signature_1 to end)
 ]
-
 
 def _gen_crc(crc):
     for j in range(8):
@@ -103,16 +103,18 @@ def cut():
         else:
             print('!!! file size: %d, length in data: %d [not match]' % (file.tell(), header['cfeLength'] + header['flashRootLength'] + header['kernelLength'] + ADDRESS_LEN['TAG_LEN'] +  ADDRESS_LEN['DLINK']))
 
-
         file.seek(0, 0)
+
         filecat = [{'name':'bcm.bin', 'len':ADDRESS_LEN['TAG_LEN']},
                    {'name':'cfe.bin', 'len':header['cfeLength']},
                    {'name':'sqsh.bin', 'len':header['flashRootLength']},
                    {'name':'kernel.bin', 'len':header['kernelLength']},
                    {'name':'name.bin', 'len':ADDRESS_LEN['DLINK']}]
 
+        # Cut the firmware into pieces
         for f in filecat:
             with open(f['name'], "wb") as fileS:
+                print('>', f['name'], f['len'])
                 fileS.write(file.read(f['len']))
 
         bdata = b''
@@ -127,6 +129,7 @@ def cut():
         else:
             print('CRC bcmtag:  0x%08X [ERROR]' % crc)
 
+        # Check the sum of the saved parts (== RC32sum['CRCimage'])
         bdata = b''
         for f in filecat[1:]:
             with open(f['name'], "rb") as file:
@@ -158,5 +161,50 @@ def cut():
         else:
             print('CRC kernel:  0x%08X [ERROR]' % crc)
 
+def packed(data, ln):
+    changelen = str(data).encode('ascii')
+    for st in range(ln - len(str(data))):
+        changelen += b'\x00'
+    return changelen
 
-cut()
+def int2bytepack(crc):
+    byteL = []
+    for i in range(4):
+        byteL.append((crc - crc//256**(i+1) * 256**(i+1)) // 256**i)
+    byteL.reverse()
+    return byteL
+
+def collect():
+    filecat = [{'name': 'bcm.bin'},
+               {'name': 'cfe.bin'},
+               {'name': 'sqsh.bin'},
+               {'name': 'kernel.bin'},
+               {'name': 'name.bin'}]
+
+    with open(filecat[0]['name'], "rb") as file:
+        bcm = file.read()
+
+    bdata = b''
+    for f in filecat[1:]:
+        with open(f['name'], "rb") as file:
+            bdata += file.read()
+            f['len'] = file.tell()
+
+    bcm = bcm[:84] + packed(filecat[1]['len'], 10) + bcm[94:]
+    bcm = bcm[:106] + packed(filecat[2]['len'], 10) + bcm[116:]
+    bcm = bcm[:128] + packed(filecat[3]['len'], 10) + bcm[138:]
+
+    # Change the CRC32 for image firmware, sqsh, kernel and bcmtag
+    adr = ADDRESS_LEN['TAG_LEN'] - ADDRESS_LEN['TOKEN_LEN'] * 2
+    CRCsqsh = crc32(bdata[filecat[1]['len']:filecat[1]['len']+filecat[2]['len']], CRC32_INIT_VALUE)
+    CRCkernel = crc32(bdata[filecat[1]['len'] + filecat[2]['len']:filecat[1]['len'] + filecat[2]['len'] + filecat[3]['len']], CRC32_INIT_VALUE)
+    bcm = bcm[:adr] + pack('>III', crc32(bdata, CRC32_INIT_VALUE), CRCsqsh, CRCkernel) +  bcm[adr+12:]
+    bcm = bcm[:ADDRESS_LEN['TAG_LEN']-ADDRESS_LEN['TOKEN_LEN']] + pack('>I',crc32(bcm[:ADDRESS_LEN['TAG_LEN']-ADDRESS_LEN['TOKEN_LEN']], CRC32_INIT_VALUE)) + bcm[ADDRESS_LEN['TAG_LEN']-ADDRESS_LEN['TOKEN_LEN']+4:]
+
+    with open(filecat[0]['name'], "wb") as file:
+        file.write(bcm)
+
+
+#cut()
+
+collect()
